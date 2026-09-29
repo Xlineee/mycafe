@@ -276,14 +276,14 @@ makeDropdown("Kategori", 6, {
 makeDivider(7)
 
 -- Statistik sesi
-makeLabel("📊 Sesi (sejak execute)", 8, 16, Color3.fromRGB(180, 180, 200), Enum.Font.GothamBold)
+makeLabel("📊 Sesi", 8, 16, Color3.fromRGB(180, 180, 200), Enum.Font.GothamBold)
 local valSessAcc = makeStatRow("Accepted", 9, Color3.fromRGB(255, 255, 255))
 local valSessClm = makeStatRow("Claimed", 10, Color3.fromRGB(255, 255, 255))
 
 makeDivider(11)
 
 -- Statistik total dari akun
-makeLabel("🏆 Total (dari akun)", 12, 16, Color3.fromRGB(255, 200, 80), Enum.Font.GothamBold)
+makeLabel("🏆 Total", 12, 16, Color3.fromRGB(255, 200, 80), Enum.Font.GothamBold)
 local valMilestoneTier = makeStatRow("Milestone", 13, Color3.fromRGB(255, 170, 50))
 local valMilestoneProgress = makeStatRow("Progress", 14, Color3.fromRGB(120, 255, 120))
 
