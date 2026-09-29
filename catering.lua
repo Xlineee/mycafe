@@ -16,15 +16,35 @@ task.wait()
 local oldGui = pg:FindFirstChild("CateringMonitor")
 if oldGui then oldGui:Destroy() end
 
--- Persist totals
-if not getgenv().TotalAccepted then getgenv().TotalAccepted = 0 end
-if not getgenv().TotalClaimed then getgenv().TotalClaimed = 0 end
-
+-- Session counters (reset tiap execute)
 local sessionAccepted = 0
 local sessionClaimed = 0
-local selectedCategory = 3 -- default kategori 3
+local selectedCategory = 3
 local antiAfkEnabled = false
 local cateringEnabled = false
+
+------------------------------------------------
+-- FUNGSI: Baca milestone catering dari akun
+------------------------------------------------
+local function getCateringMilestone()
+    local ok, milestones = pcall(function()
+        return pg.Menu.Menu.Content.List.Milestones.Content
+    end)
+    if not ok or not milestones then return nil, nil, nil end
+
+    for _, entry in ipairs(milestones:GetChildren()) do
+        if entry:IsA("GuiObject") and entry.Name:lower():find("catering") then
+            local cur = entry:FindFirstChild("currentAmount")
+            local tier = entry:FindFirstChild("Tier")
+            if cur and cur:IsA("TextLabel") then
+                local now, max = cur.Text:match("(%d[%d,K]*)%s*/%s*(%d[%d,K]*)")
+                local tierText = tier and tier:IsA("TextLabel") and tier.Text or "?"
+                return cur.Text, tierText, entry
+            end
+        end
+    end
+    return nil, nil, nil
+end
 
 ------------------------------------------------
 -- GUI
@@ -37,8 +57,8 @@ screenGui.Parent = pg
 
 local frame = Instance.new("Frame")
 frame.Name = "MainFrame"
-frame.Size = UDim2.new(0, 240, 0, 270)
-frame.Position = UDim2.new(0, 10, 0.5, -135)
+frame.Size = UDim2.new(0, 250, 0, 310)
+frame.Position = UDim2.new(0, 10, 0.5, -155)
 frame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
 frame.BackgroundTransparency = 0.08
 frame.BorderSizePixel = 0
@@ -51,7 +71,6 @@ stk.Color = Color3.fromRGB(80, 140, 255)
 stk.Thickness = 1.5
 stk.Transparency = 0.2
 
--- Padding helper
 local pad = Instance.new("UIPadding", frame)
 pad.PaddingLeft = UDim.new(0, 12)
 pad.PaddingRight = UDim.new(0, 12)
@@ -59,7 +78,7 @@ pad.PaddingTop = UDim.new(0, 10)
 
 local layout = Instance.new("UIListLayout", frame)
 layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Padding = UDim.new(0, 6)
+layout.Padding = UDim.new(0, 5)
 
 ------------------------------------------------
 -- UI HELPERS
@@ -88,7 +107,6 @@ local function makeDivider(order)
     return d
 end
 
--- Toggle button
 local function makeToggle(labelText, order, defaultOn, callback)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 26)
@@ -136,10 +154,9 @@ local function makeToggle(labelText, order, defaultOn, callback)
         callback(isOn)
     end)
 
-    return function() return isOn end, function(v) isOn = v; refresh() end
+    return function() return isOn end
 end
 
--- Dropdown
 local function makeDropdown(labelText, order, options, default, callback)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 26)
@@ -205,7 +222,6 @@ local function makeDropdown(labelText, order, options, default, callback)
     refreshAll()
 end
 
--- Stat row
 local function makeStatRow(labelText, order, valueColor)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 18)
@@ -214,7 +230,7 @@ local function makeStatRow(labelText, order, valueColor)
     row.Parent = frame
 
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(0.65, 0, 1, 0)
+    lbl.Size = UDim2.new(0.6, 0, 1, 0)
     lbl.BackgroundTransparency = 1
     lbl.Text = labelText
     lbl.TextColor3 = Color3.fromRGB(150, 150, 150)
@@ -225,8 +241,8 @@ local function makeStatRow(labelText, order, valueColor)
 
     local val = Instance.new("TextLabel")
     val.Name = "Value"
-    val.Size = UDim2.new(0.35, 0, 1, 0)
-    val.Position = UDim2.new(0.65, 0, 0, 0)
+    val.Size = UDim2.new(0.4, 0, 1, 0)
+    val.Position = UDim2.new(0.6, 0, 0, 0)
     val.BackgroundTransparency = 1
     val.Text = "0"
     val.TextColor3 = valueColor or Color3.fromRGB(255, 255, 255)
@@ -241,46 +257,59 @@ end
 ------------------------------------------------
 -- BUILD GUI
 ------------------------------------------------
--- Title
 makeLabel("🍽️ Catering Monitor", 1, 20, Color3.fromRGB(80, 170, 255), Enum.Font.GothamBold)
 makeDivider(2)
 
 -- Toggles
-local getAfk, setAfk = makeToggle("Anti AFK", 3, false, function(on)
-    antiAfkEnabled = on
-end)
-
-local getCat, setCat = makeToggle("Auto Catering", 4, false, function(on)
-    cateringEnabled = on
-end)
+makeToggle("Anti AFK", 3, false, function(on) antiAfkEnabled = on end)
+makeToggle("Auto Catering", 4, false, function(on) cateringEnabled = on end)
 
 makeDivider(5)
 
--- Dropdown kategori
+-- Kategori
 makeDropdown("Kategori", 6, {
     { label = "1", value = 1 },
     { label = "2", value = 2 },
     { label = "3", value = 3 },
-}, 3, function(val)
-    selectedCategory = val
-end)
+}, 3, function(val) selectedCategory = val end)
 
 makeDivider(7)
 
--- Stats
-makeLabel("📊 Statistik", 8, 16, Color3.fromRGB(180, 180, 200), Enum.Font.GothamBold)
-local valSessAcc = makeStatRow("Sesi - Accepted", 9, Color3.fromRGB(255, 255, 255))
-local valSessClm = makeStatRow("Sesi - Claimed", 10, Color3.fromRGB(255, 255, 255))
-local valTotalAcc = makeStatRow("Total - Accepted", 11, Color3.fromRGB(120, 255, 120))
-local valTotalClm = makeStatRow("Total - Claimed", 12, Color3.fromRGB(255, 220, 80))
+-- Statistik sesi
+makeLabel("📊 Sesi (sejak execute)", 8, 16, Color3.fromRGB(180, 180, 200), Enum.Font.GothamBold)
+local valSessAcc = makeStatRow("Accepted", 9, Color3.fromRGB(255, 255, 255))
+local valSessClm = makeStatRow("Claimed", 10, Color3.fromRGB(255, 255, 255))
 
+makeDivider(11)
+
+-- Statistik total dari akun
+makeLabel("🏆 Total (dari akun)", 12, 16, Color3.fromRGB(255, 200, 80), Enum.Font.GothamBold)
+local valMilestoneTier = makeStatRow("Milestone", 13, Color3.fromRGB(255, 170, 50))
+local valMilestoneProgress = makeStatRow("Progress", 14, Color3.fromRGB(120, 255, 120))
+
+-- Update GUI
 local function updateGui()
-    valSessAcc.Text  = tostring(sessionAccepted)
-    valSessClm.Text  = tostring(sessionClaimed)
-    valTotalAcc.Text = tostring(getgenv().TotalAccepted)
-    valTotalClm.Text = tostring(getgenv().TotalClaimed)
+    valSessAcc.Text = tostring(sessionAccepted)
+    valSessClm.Text = tostring(sessionClaimed)
+
+    local progress, tierName = getCateringMilestone()
+    if progress then
+        valMilestoneProgress.Text = progress
+        valMilestoneTier.Text = tierName or "?"
+    else
+        valMilestoneProgress.Text = "..."
+        valMilestoneTier.Text = "Loading"
+    end
 end
 updateGui()
+
+-- Auto-refresh milestone setiap 5 detik
+task.spawn(function()
+    while screenGui.Parent do
+        task.wait(5)
+        pcall(updateGui)
+    end
+end)
 
 ------------------------------------------------
 -- DRAGGABLE
@@ -326,14 +355,12 @@ task.spawn(function()
     while getgenv().AntiAFKLoop do
         task.wait(1)
         if antiAfkEnabled then
-            -- Pasang event listener kalau belum
             if not getgenv().AntiAFKConn then
                 getgenv().AntiAFKConn = lp.Idled:Connect(function()
                     VirtualUser:CaptureController()
                     VirtualUser:ClickButton2(Vector2.new())
                 end)
             end
-            -- Simulate input tiap 60 detik
             for i = 1, 60 do
                 task.wait(1)
                 if not antiAfkEnabled or not getgenv().AntiAFKLoop then break end
@@ -345,7 +372,6 @@ task.spawn(function()
                 VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
             end
         else
-            -- Kalau OFF, disconnect listener
             if getgenv().AntiAFKConn then
                 getgenv().AntiAFKConn:Disconnect()
                 getgenv().AntiAFKConn = nil
@@ -392,14 +418,12 @@ task.spawn(function()
             if not cur then
                 Catering:FireServer("accept", selectedCategory)
                 sessionAccepted += 1
-                getgenv().TotalAccepted += 1
                 updateGui()
                 task.wait(0.3)
 
             elseif cur >= max then
                 Catering:FireServer("claim")
                 sessionClaimed += 1
-                getgenv().TotalClaimed += 1
                 updateGui()
                 print("Claimed!")
 
@@ -410,6 +434,7 @@ task.spawn(function()
                     task.wait(0.05)
                     t += 0.05
                 end
+
             else
                 task.wait(0.2)
             end
