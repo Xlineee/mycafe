@@ -1,0 +1,11 @@
+local a=game:GetService"Players"local b=game:GetService"ReplicatedStorage"local c=game:GetService"VirtualUser"local d=a.LocalPlayer
+if getgenv().A then getgenv().A:Disconnect()end
+getgenv().A=d.Idled:Connect(function()c:CaptureController()c:ClickButton2(Vector2.new())end)
+getgenv().B=false;task.wait()getgenv().B=true
+task.spawn(function()while getgenv().B do task.wait(60)if not getgenv().B then break end
+c:CaptureController()c:Button2Down(Vector2.new(0,0),workspace.CurrentCamera.CFrame)task.wait(.1)c:Button2Up(Vector2.new(0,0),workspace.CurrentCamera.CFrame)end end)
+local e=b:WaitForChild("Network"):WaitForChild("Catering")local f=d:WaitForChild("PlayerGui")
+local function g()for _,v in ipairs(f:GetDescendants())do if v.Name=="Catering"and v:FindFirstChild("Content")then return v.Content end end end
+local function h()local i=g()if not i then return end;for _,j in ipairs(i:GetChildren())do if j.Name:match("^Entry")and j.Visible then local k=j:FindFirstChild("Detail")if k and k:IsA("TextLabel")and k.Visible then local l,m=k.Text:match("(%d+)%s*/%s*(%d+)")if l then return tonumber(l),tonumber(m)end end end end end
+getgenv().C=false;task.wait()getgenv().C=true
+task.spawn(function()while getgenv().C do local l,m=h()if not l then e:FireServer("accept",3)task.wait(.3)elseif l>=m then e:FireServer("claim")print("Claimed!")local t=0;while t<3 do local a,b=h()if not a or a<b then break end;task.wait(.05)t=t+.05 end else task.wait(.2)end end end)
