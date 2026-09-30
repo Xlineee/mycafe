@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local VirtualUser = game:GetService("VirtualUser")
 local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 local lp = Players.LocalPlayer
 local pg = lp:WaitForChild("PlayerGui")
 
@@ -11,17 +12,23 @@ local pg = lp:WaitForChild("PlayerGui")
 if getgenv().AntiAFKConn then getgenv().AntiAFKConn:Disconnect(); getgenv().AntiAFKConn = nil end
 getgenv().AntiAFKLoop = false
 getgenv().CateringFarm = false
+getgenv().AutoDishesLoop = false
+getgenv().AutoDeliveryLoop = false
+getgenv().ParticleHookActive = false
 task.wait()
 
 local oldGui = pg:FindFirstChild("CateringMonitor")
 if oldGui then oldGui:Destroy() end
 
--- Session counters (reset tiap execute)
+-- Session counters
 local sessionAccepted = 0
 local sessionClaimed = 0
 local selectedCategory = 3
 local antiAfkEnabled = false
 local cateringEnabled = false
+local autoDishesEnabled = false
+local autoDeliveryEnabled = false
+local hideParticlesEnabled = false
 
 ------------------------------------------------
 -- FUNGSI: Baca milestone catering dari akun
@@ -47,6 +54,36 @@ local function getCateringMilestone()
 end
 
 ------------------------------------------------
+-- FUNGSI: Baca total playtime dari DataService
+------------------------------------------------
+local function getPlaytime()
+    local ok, result = pcall(function()
+        local DataService = require(RS.Code.packages.DataService)
+        local data = DataService.client._data._data
+        if data and data.stats then
+            return data.stats["Time Played"] or 0
+        end
+        return 0
+    end)
+    return ok and result or 0
+end
+
+local function formatPlaytime(totalSeconds)
+    totalSeconds = math.floor(totalSeconds)
+    local days = math.floor(totalSeconds / 86400)
+    local hours = math.floor((totalSeconds % 86400) / 3600)
+    local mins = math.floor((totalSeconds % 3600) / 60)
+    local secs = totalSeconds % 60
+    if days > 0 then
+        return string.format("%dd %dh %dm", days, hours, mins)
+    elseif hours > 0 then
+        return string.format("%dh %dm %ds", hours, mins, secs)
+    else
+        return string.format("%dm %ds", mins, secs)
+    end
+end
+
+------------------------------------------------
 -- GUI
 ------------------------------------------------
 local screenGui = Instance.new("ScreenGui")
@@ -57,8 +94,8 @@ screenGui.Parent = pg
 
 local frame = Instance.new("Frame")
 frame.Name = "MainFrame"
-frame.Size = UDim2.new(0, 250, 0, 310)
-frame.Position = UDim2.new(0, 10, 0.5, -155)
+frame.Size = UDim2.new(0, 260, 0, 520)
+frame.Position = UDim2.new(0, 10, 0.5, -260)
 frame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
 frame.BackgroundTransparency = 0.08
 frame.BorderSizePixel = 0
@@ -257,35 +294,54 @@ end
 ------------------------------------------------
 -- BUILD GUI
 ------------------------------------------------
-makeLabel("🍽️ Catering Monitor", 1, 20, Color3.fromRGB(80, 170, 255), Enum.Font.GothamBold)
-makeDivider(2)
+local orderIdx = 0
+local function nextOrder()
+    orderIdx = orderIdx + 1
+    return orderIdx
+end
+
+makeLabel("🍽️ My Cafe Tools", nextOrder(), 20, Color3.fromRGB(80, 170, 255), Enum.Font.GothamBold)
+makeDivider(nextOrder())
 
 -- Toggles
-makeToggle("Anti AFK", 3, false, function(on) antiAfkEnabled = on end)
-makeToggle("Auto Catering", 4, false, function(on) cateringEnabled = on end)
+makeToggle("Anti AFK", nextOrder(), false, function(on) antiAfkEnabled = on end)
+makeToggle("Auto Catering", nextOrder(), false, function(on) cateringEnabled = on end)
+makeToggle("Auto Dishes", nextOrder(), false, function(on) autoDishesEnabled = on end)
+makeToggle("Auto Delivery", nextOrder(), false, function(on) autoDeliveryEnabled = on end)
+makeToggle("Hide FX Particles", nextOrder(), false, function(on)
+    hideParticlesEnabled = on
+end)
 
-makeDivider(5)
+makeDivider(nextOrder())
 
--- Kategori
-makeDropdown("Kategori", 6, {
+-- Kategori Catering
+makeDropdown("Catering", nextOrder(), {
     { label = "1", value = 1 },
     { label = "2", value = 2 },
     { label = "3", value = 3 },
 }, 3, function(val) selectedCategory = val end)
 
-makeDivider(7)
+makeDivider(nextOrder())
 
 -- Statistik sesi
-makeLabel("📊 Sesi", 8, 16, Color3.fromRGB(180, 180, 200), Enum.Font.GothamBold)
-local valSessAcc = makeStatRow("Accepted", 9, Color3.fromRGB(255, 255, 255))
-local valSessClm = makeStatRow("Claimed", 10, Color3.fromRGB(255, 255, 255))
+makeLabel("📊 Sesi", nextOrder(), 16, Color3.fromRGB(180, 180, 200), Enum.Font.GothamBold)
+local valSessAcc = makeStatRow("Accepted", nextOrder(), Color3.fromRGB(255, 255, 255))
+local valSessClm = makeStatRow("Claimed", nextOrder(), Color3.fromRGB(255, 255, 255))
 
-makeDivider(11)
+makeDivider(nextOrder())
 
 -- Statistik total dari akun
-makeLabel("🏆 Total", 12, 16, Color3.fromRGB(255, 200, 80), Enum.Font.GothamBold)
-local valMilestoneTier = makeStatRow("Milestone", 13, Color3.fromRGB(255, 170, 50))
-local valMilestoneProgress = makeStatRow("Progress", 14, Color3.fromRGB(120, 255, 120))
+makeLabel("🏆 Total", nextOrder(), 16, Color3.fromRGB(255, 200, 80), Enum.Font.GothamBold)
+local valMilestoneTier = makeStatRow("Milestone", nextOrder(), Color3.fromRGB(255, 170, 50))
+local valMilestoneProgress = makeStatRow("Progress", nextOrder(), Color3.fromRGB(120, 255, 120))
+
+makeDivider(nextOrder())
+
+-- Playtime
+makeLabel("⏱️ Playtime", nextOrder(), 16, Color3.fromRGB(100, 200, 255), Enum.Font.GothamBold)
+local valPlaytime = makeStatRow("Total", nextOrder(), Color3.fromRGB(180, 230, 255))
+local valSessionTime = makeStatRow("Session", nextOrder(), Color3.fromRGB(140, 200, 230))
+local sessionStart = os.clock()
 
 -- Update GUI
 local function updateGui()
@@ -300,10 +356,16 @@ local function updateGui()
         valMilestoneProgress.Text = "..."
         valMilestoneTier.Text = "Loading"
     end
+
+    -- Playtime
+    local totalSec = getPlaytime()
+    valPlaytime.Text = formatPlaytime(totalSec)
+    local sessionSec = math.floor(os.clock() - sessionStart)
+    valSessionTime.Text = formatPlaytime(sessionSec)
 end
 updateGui()
 
--- Auto-refresh milestone setiap 5 detik
+-- Auto-refresh setiap 5 detik
 task.spawn(function()
     while screenGui.Parent do
         task.wait(5)
@@ -381,7 +443,7 @@ task.spawn(function()
 end)
 
 ------------------------------------------------
--- AUTO CATERING LOOP
+-- AUTO CATERING LOOP (FIXED: cek reward pending)
 ------------------------------------------------
 local Catering = RS:WaitForChild("Network"):WaitForChild("Catering")
 
@@ -409,6 +471,42 @@ local function getProgress()
     end
 end
 
+-- Check apakah ada reward yang bisa di-claim (tombol claim visible)
+local function hasClaimableReward()
+    local content = findContent()
+    if not content then return false end
+    for _, entry in ipairs(content:GetChildren()) do
+        if entry.Name:match("^Entry") and entry.Visible then
+            -- Cari tombol claim (biasanya TextButton atau ImageButton dengan text "Claim")
+            for _, child in ipairs(entry:GetDescendants()) do
+                if (child:IsA("TextButton") or child:IsA("ImageButton")) then
+                    if child.Visible then
+                        local txt = ""
+                        pcall(function() txt = child.Text end)
+                        if txt:lower():find("claim") then
+                            return true
+                        end
+                    end
+                end
+                -- Cek apakah ada label yang menunjukkan "Completed" atau progress full
+                if child:IsA("TextLabel") and child.Visible then
+                    local t = child.Text:lower()
+                    if t:find("completed") or t:find("complete") then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- Cek apakah ada active catering order (Entry visible dengan progress)
+local function hasActiveCatering()
+    local cur, max = getProgress()
+    return cur ~= nil
+end
+
 getgenv().CateringFarm = true
 task.spawn(function()
     while getgenv().CateringFarm do
@@ -416,10 +514,20 @@ task.spawn(function()
             local cur, max = getProgress()
 
             if not cur then
-                Catering:FireServer("accept", selectedCategory)
-                sessionAccepted += 1
-                updateGui()
-                task.wait(0.3)
+                -- FIX: Sebelum accept, cek apakah ada reward pending yang belum di-claim
+                -- Jika ada, coba claim dulu, JANGAN accept baru
+                if hasClaimableReward() then
+                    Catering:FireServer("claim")
+                    sessionClaimed += 1
+                    updateGui()
+                    print("[Catering] Claimed pending reward")
+                    task.wait(0.5)
+                else
+                    Catering:FireServer("accept", selectedCategory)
+                    sessionAccepted += 1
+                    updateGui()
+                    task.wait(0.3)
+                end
 
             elseif cur >= max then
                 Catering:FireServer("claim")
@@ -443,3 +551,250 @@ task.spawn(function()
         end
     end
 end)
+
+------------------------------------------------
+-- AUTO WASH DISHES (1-5 plates scrub)
+-- Menggunakan ProximityPrompt trigger + JobEvent
+------------------------------------------------
+local JobEvent = RS:WaitForChild("Network"):WaitForChild("JobEvent")
+
+local function findMyStation()
+    for _, descendant in ipairs(workspace:GetDescendants()) do
+        if descendant.Name == "CafeJobs" and descendant:GetAttribute("JobOwnerId") == lp.UserId then
+            return descendant
+        end
+    end
+    return nil
+end
+
+local function findDishesPrompt()
+    local station = findMyStation()
+    if not station then return nil end
+    local dishes = station:FindFirstChild("Dishes")
+    if dishes then
+        return dishes:FindFirstChild("Prompt")
+    end
+    return nil
+end
+
+local function findDeliveryPrompt()
+    local station = findMyStation()
+    if not station then return nil end
+    local delivery = station:FindFirstChild("Delivery")
+    if delivery then
+        return delivery:FindFirstChild("Prompt")
+    end
+    return nil
+end
+
+-- Check apakah sedang dalam job aktif
+local function isJobActive()
+    local cafeJobsGui = pg:FindFirstChild("CafeJobs")
+    if not cafeJobsGui then return false end
+    if not cafeJobsGui.Enabled then return false end
+    local banner = cafeJobsGui:FindFirstChild("Banner")
+    return banner and banner.Visible
+end
+
+-- Listen for job events dari server
+local activeJobId = nil
+local activeJobType = nil
+local dishRound = 1
+local dishClean = false
+local deliveryTarget = nil
+
+JobEvent.OnClientEvent:Connect(function(action, data)
+    if action == "start" then
+        activeJobId = data.id
+        activeJobType = data.job
+        dishRound = 1
+        dishClean = false
+        deliveryTarget = nil
+    elseif action == "plate" then
+        if data.id == activeJobId then
+            dishRound = data.round
+            dishClean = false
+        end
+    elseif action == "delivery" then
+        if data.id == activeJobId then
+            deliveryTarget = data.target
+        end
+    elseif action == "complete" or action == "cancel" then
+        activeJobId = nil
+        activeJobType = nil
+        deliveryTarget = nil
+        dishClean = false
+    elseif action == "scrub" then
+        if data and data.id == activeJobId then
+            if data.progress and data.progress >= 0.95 then
+                dishClean = true
+            end
+        end
+    end
+end)
+
+-- Auto Dishes: trigger prompt, lalu spam scrub events
+getgenv().AutoDishesLoop = true
+task.spawn(function()
+    while getgenv().AutoDishesLoop do
+        if autoDishesEnabled then
+            -- Jika tidak ada job aktif, trigger dishes prompt
+            if not activeJobId then
+                local prompt = findDishesPrompt()
+                if prompt and prompt.Enabled then
+                    -- Fire proximity prompt
+                    fireproximityprompt(prompt)
+                    task.wait(0.8) -- Tunggu server respond
+                end
+            elseif activeJobType == "Dishes" and activeJobId then
+                -- Spam scrub events di posisi yang tepat untuk membersihkan plate
+                -- Scrub di berbagai posisi dalam radius dirt (0.39)
+                -- GridSize = 24, CompletionThreshold = 0.95
+                local scrubPositions = {
+                    Vector2.new(0.5, 0.5),
+                    Vector2.new(0.35, 0.35),
+                    Vector2.new(0.65, 0.35),
+                    Vector2.new(0.35, 0.65),
+                    Vector2.new(0.65, 0.65),
+                    Vector2.new(0.5, 0.35),
+                    Vector2.new(0.5, 0.65),
+                    Vector2.new(0.35, 0.5),
+                    Vector2.new(0.65, 0.5),
+                    Vector2.new(0.42, 0.42),
+                    Vector2.new(0.58, 0.42),
+                    Vector2.new(0.42, 0.58),
+                    Vector2.new(0.58, 0.58),
+                    Vector2.new(0.3, 0.5),
+                    Vector2.new(0.7, 0.5),
+                    Vector2.new(0.5, 0.3),
+                    Vector2.new(0.5, 0.7),
+                    Vector2.new(0.38, 0.3),
+                    Vector2.new(0.62, 0.3),
+                    Vector2.new(0.38, 0.7),
+                    Vector2.new(0.62, 0.7),
+                }
+
+                local seq = 0
+                for _, pos in ipairs(scrubPositions) do
+                    if not autoDishesEnabled or not activeJobId or activeJobType ~= "Dishes" then break end
+                    seq += 1
+                    -- FireServer("scrub", id, position, round, seq, hasPrevious)
+                    JobEvent:FireServer("scrub", activeJobId, pos, dishRound, seq, seq > 1)
+                    task.wait(0.09) -- Interval sesuai SendInterval (0.083)
+                end
+
+                -- Tunggu server respon plate completion
+                task.wait(0.5)
+            else
+                task.wait(0.3)
+            end
+        else
+            task.wait(0.5)
+        end
+    end
+end)
+
+------------------------------------------------
+-- AUTO TAKEAWAY DELIVERY
+-- Trigger prompt, teleport ke target, deliver
+------------------------------------------------
+getgenv().AutoDeliveryLoop = true
+task.spawn(function()
+    while getgenv().AutoDeliveryLoop do
+        if autoDeliveryEnabled then
+            if not activeJobId then
+                -- Trigger delivery prompt
+                local prompt = findDeliveryPrompt()
+                if prompt and prompt.Enabled then
+                    fireproximityprompt(prompt)
+                    task.wait(1.0) -- Tunggu server respond dan delivery event
+                end
+            elseif activeJobType == "Delivery" and activeJobId then
+                -- Tunggu sampai deliveryTarget di-set oleh server
+                if deliveryTarget then
+                    -- Teleport karakter ke target
+                    local char = lp.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        -- Teleport ke dekat doorstep (target posisi)
+                        hrp.CFrame = CFrame.new(deliveryTarget + Vector3.new(0, 3, 0))
+                        task.wait(0.5)
+
+                        -- Fire deliver event
+                        JobEvent:FireServer("deliver", activeJobId)
+                        task.wait(1.0)
+
+                        -- Teleport balik ke station
+                        local station = findMyStation()
+                        if station then
+                            local delivery = station:FindFirstChild("Delivery")
+                            if delivery and hrp.Parent then
+                                hrp.CFrame = CFrame.new(delivery.Position + Vector3.new(0, 3, 0))
+                            end
+                        end
+                        task.wait(0.5)
+                    end
+                else
+                    task.wait(0.3)
+                end
+            else
+                task.wait(0.3)
+            end
+        else
+            task.wait(0.5)
+        end
+    end
+end)
+
+------------------------------------------------
+-- HIDE REWARD PARTICLES (money/token burst effect)
+-- Hook ke BottomLeft (HUD) untuk intercept CurrencyGain clones
+------------------------------------------------
+task.spawn(function()
+    local hud = pg:WaitForChild("Hud", 10)
+    if not hud then return end
+    local bottomLeft = hud:WaitForChild("BottomLeft", 10)
+    if not bottomLeft then return end
+
+    -- Monitor BottomLeft untuk ChildAdded, hapus CurrencyGain
+    bottomLeft.ChildAdded:Connect(function(child)
+        if hideParticlesEnabled and child.Name == "CurrencyGain" then
+            child:Destroy()
+        end
+    end)
+
+    -- Juga hapus dari parent Hud (bisa juga muncul di parent lain)
+    local hudParent = bottomLeft.Parent
+    if hudParent then
+        hudParent.ChildAdded:Connect(function(child)
+            if hideParticlesEnabled and child.Name == "CurrencyGain" then
+                child:Destroy()
+            end
+        end)
+    end
+end)
+
+-- Juga hook ke template "Add" frames yang muncul saat mendapat reward
+task.spawn(function()
+    local hud = pg:WaitForChild("Hud", 10)
+    if not hud then return end
+    local bottomLeft = hud:WaitForChild("BottomLeft", 10)
+    if not bottomLeft then return end
+
+    -- Monitor untuk Add frames (the +$X popup)
+    bottomLeft.DescendantAdded:Connect(function(desc)
+        if hideParticlesEnabled then
+            if desc.Name == "CurrencyGain" then
+                desc:Destroy()
+            end
+        end
+    end)
+end)
+
+print("[My Cafe Tools] Loaded! Features:")
+print("  - Anti AFK")
+print("  - Auto Catering (fixed accept bug)")
+print("  - Auto Dishes (scrub 1-5 plates)")
+print("  - Auto Delivery (teleport)")
+print("  - Hide FX Particles")
+print("  - Playtime tracker")
