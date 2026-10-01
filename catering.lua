@@ -12,8 +12,7 @@ local pg = lp:WaitForChild("PlayerGui")
 if getgenv().AntiAFKConn then getgenv().AntiAFKConn:Disconnect(); getgenv().AntiAFKConn = nil end
 getgenv().AntiAFKLoop = false
 getgenv().CateringFarm = false
-getgenv().AutoDishesLoop = false
-getgenv().AutoDeliveryLoop = false
+getgenv().AutoDeliveryRun = nil
 getgenv().ParticleHookActive = false
 task.wait()
 
@@ -26,7 +25,6 @@ local sessionClaimed = 0
 local selectedCategory = 3
 local antiAfkEnabled = false
 local cateringEnabled = false
-local autoDishesEnabled = false
 local autoDeliveryEnabled = false
 local hideParticlesEnabled = false
 
@@ -306,7 +304,6 @@ makeDivider(nextOrder())
 -- Toggles
 makeToggle("Anti AFK", nextOrder(), false, function(on) antiAfkEnabled = on end)
 makeToggle("Auto Catering", nextOrder(), false, function(on) cateringEnabled = on end)
-makeToggle("Auto Dishes", nextOrder(), false, function(on) autoDishesEnabled = on end)
 makeToggle("Auto Delivery", nextOrder(), false, function(on) autoDeliveryEnabled = on end)
 makeToggle("Hide FX Particles", nextOrder(), false, function(on)
     hideParticlesEnabled = on
@@ -553,26 +550,86 @@ task.spawn(function()
 end)
 
 ------------------------------------------------
--- AUTO WASH DISHES (1-5 plates scrub)
--- Menggunakan ProximityPrompt trigger + JobEvent
+-- AUTO DELIVERY (takeaway)
+-- Alur: accept order -> tunggu 1 detik -> tween DI DEPAN NPC (berdiri di tanah)
+--       -> hand over via remote (cadangan: tahan E / klik tombol) -> order ke-claim -> ulang
 ------------------------------------------------
 local JobEvent = RS:WaitForChild("Network"):WaitForChild("JobEvent")
 
-local function findMyStation()
-    for _, descendant in ipairs(workspace:GetDescendants()) do
-        if descendant.Name == "CafeJobs" and descendant:GetAttribute("JobOwnerId") == lp.UserId then
-            return descendant
-        end
-    end
-    return nil
+local DELIVERY_ACCEPT_WAIT = 0.5  -- detik setelah accept sebelum tween ke NPC
+local DELIVERY_FRONT_DIST = 3.5   -- jarak berdiri di depan NPC (studs)
+local DELIVERY_REPEAT_WAIT = 0.3  -- jeda sebelum order berikutnya
+local DELIVERY_HAND_TIMEOUT = 1.2 -- tunggu respon server per metode hand over (detik)
+local DELIVERY_TWEEN_SPEED = 80  -- kecepatan tween (studs/detik); kecilkan kalau kena cancel
+
+local function dlog(...)
+    print("[AutoDelivery]", ...)
 end
 
-local function findDishesPrompt()
-    local station = findMyStation()
-    if not station then return nil end
-    local dishes = station:FindFirstChild("Dishes")
-    if dishes then
-        return dishes:FindFirstChild("Prompt")
+local function dwaitUntil(cond, timeout)
+    local t = 0
+    while t < timeout do
+        if cond() then return true end
+        task.wait(0.05)
+        t += 0.05
+    end
+    return cond() and true or false
+end
+
+local function getHRP()
+    local char = lp.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHumanoid()
+    local char = lp.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+------------------------------------------------
+-- State job dari event server
+-- "cancel" mengirim STRING alasan (bukan table)
+------------------------------------------------
+local job = nil       -- { id, kind, at, ready, doorstep, target }
+local lastEnd = nil   -- { action, reason }
+
+if getgenv().DeliveryEventConn then
+    getgenv().DeliveryEventConn:Disconnect()
+    getgenv().DeliveryEventConn = nil
+end
+getgenv().DeliveryEventConn = JobEvent.OnClientEvent:Connect(function(action, data)
+    if action == "start" and type(data) == "table" then
+        job = { id = data.id, kind = tostring(data.job), at = os.clock(), ready = false }
+    elseif action == "delivery" and type(data) == "table" then
+        if job and job.id == data.id then
+            job.doorstep = data.doorstep -- CFrame pintu/NPC
+            job.target = data.target     -- Vector3 tujuan
+            job.ready = true
+        elseif not job then
+            job = { id = data.id, kind = "Delivery", at = os.clock(), doorstep = data.doorstep, target = data.target, ready = true }
+        end
+    elseif action == "complete" then
+        lastEnd = { action = "complete" }
+        job = nil
+    elseif action == "cancel" then
+        lastEnd = { action = "cancel", reason = tostring(data) }
+        job = nil
+        dlog("order di-cancel server:", tostring(data))
+    end
+end)
+
+------------------------------------------------
+-- Station & prompt "Delivery" (tempat accept order)
+------------------------------------------------
+local cachedStation = nil
+local function findMyStation()
+    if cachedStation and cachedStation.Parent then return cachedStation end
+    cachedStation = nil
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d.Name == "CafeJobs" and d:GetAttribute("JobOwnerId") == lp.UserId then
+            cachedStation = d
+            return d
+        end
     end
     return nil
 end
@@ -580,165 +637,322 @@ end
 local function findDeliveryPrompt()
     local station = findMyStation()
     if not station then return nil end
-    local delivery = station:FindFirstChild("Delivery")
-    if delivery then
-        return delivery:FindFirstChild("Prompt")
+    local part = station:FindFirstChild("Delivery")
+    if not part then return nil end
+    return part:FindFirstChild("Prompt") or part:FindFirstChildWhichIsA("ProximityPrompt", true)
+end
+
+local function promptPosition(prompt)
+    local p = prompt.Parent
+    if not p then return nil end
+    if p:IsA("Attachment") then return p.WorldPosition end
+    if p:IsA("PVInstance") then return p:GetPivot().Position end
+    return nil
+end
+
+-- Karakter sudah mendarat & berhenti
+local function settled()
+    local hrp = getHRP()
+    if not hrp then return true end
+    local hum = getHumanoid()
+    local grounded = (not hum) or hum.FloorMaterial ~= Enum.Material.Air
+    return grounded and hrp.AssemblyLinearVelocity.Magnitude < 1
+end
+
+------------------------------------------------
+-- TWEEN: gerakkan karakter mulus ke tujuan (bukan teleport instan)
+-- Collision dimatikan selama jalan supaya tidak nyangkut bangunan,
+-- velocity di-nol-kan supaya tidak jatuh. abort() -> berhenti kalau job batal.
+------------------------------------------------
+local TweenService = game:GetService("TweenService")
+
+local function tweenTo(cf, abort)
+    local hrp = getHRP()
+    if not hrp then return false end
+
+    local dist = (hrp.Position - cf.Position).Magnitude
+    local duration = math.max(dist / DELIVERY_TWEEN_SPEED, 0.15)
+
+    local finished = false
+    local tween = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = cf })
+    tween.Completed:Connect(function() finished = true end)
+
+    local noclip = RunService.Stepped:Connect(function()
+        local char = lp.Character
+        if not char then return end
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("BasePart") then d.CanCollide = false end
+        end
+    end)
+    local still = RunService.Heartbeat:Connect(function()
+        local h = getHRP()
+        if h then
+            h.AssemblyLinearVelocity = Vector3.zero
+            h.AssemblyAngularVelocity = Vector3.zero
+        end
+    end)
+
+    tween:Play()
+    dwaitUntil(function()
+        return finished or (abort ~= nil and abort())
+    end, duration + 3)
+
+    if not finished then tween:Cancel() end
+    noclip:Disconnect()
+    still:Disconnect()
+
+    local h = getHRP()
+    if h then h.AssemblyLinearVelocity = Vector3.zero end
+    return finished
+end
+
+------------------------------------------------
+-- LANGKAH 1: accept order di station
+------------------------------------------------
+local function acceptOrder()
+    local prompt = findDeliveryPrompt()
+    if not prompt then
+        dlog("prompt Delivery di station tidak ketemu")
+        return false
+    end
+    if not prompt.Enabled then return false end
+
+    -- balik ke station (tween) kalau masih jauh, mis. habis dari rumah NPC
+    local hrp, pos = getHRP(), promptPosition(prompt)
+    if hrp and pos and (hrp.Position - pos).Magnitude > math.max(prompt.MaxActivationDistance - 3, 4) then
+        pcall(function() lp:RequestStreamAroundAsync(pos, 1) end)
+        if not tweenTo(CFrame.new(pos + Vector3.new(0, 3, 0))) then return false end
+        dwaitUntil(settled, 2)
+    end
+
+    job = nil
+    fireproximityprompt(prompt)
+    -- tunggu server kirim "start" lalu "delivery" (berisi posisi NPC)
+    local ok = dwaitUntil(function() return job ~= nil and job.ready end, 5)
+    if not ok and job and not job.ready then
+        dlog("delivery data timeout, reset job")
+        job = nil
+    end
+    return ok
+end
+
+------------------------------------------------
+-- LANGKAH 3: hitung koordinat tujuan & tween ke DEPAN NPC
+------------------------------------------------
+local function getDeliveryGoal(j)
+    local basePos, lookAtPos
+    if j.doorstep then
+        local cf = j.doorstep
+        local front = (cf.LookVector * Vector3.new(1, 0, 1))
+        if front.Magnitude < 0.05 and j.target then
+            front = (j.target - cf.Position) * Vector3.new(1, 0, 1)
+        end
+        if front.Magnitude < 0.05 then
+            front = Vector3.new(0, 0, 1)
+        end
+        front = front.Unit
+        basePos = cf.Position + front * DELIVERY_FRONT_DIST
+        lookAtPos = cf.Position
+    elseif j.target then
+        basePos = j.target + Vector3.new(0, 0, DELIVERY_FRONT_DIST)
+        lookAtPos = j.target
+    else
+        return nil
+    end
+
+    local hrp, hum = getHRP(), getHumanoid()
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    if lp.Character then
+        params.FilterDescendantsInstances = { lp.Character }
+    end
+    local hit = workspace:Raycast(basePos + Vector3.new(0, 6, 0), Vector3.new(0, -30, 0), params)
+    local hip = (hum and hum.HipHeight or 2) + (hrp and hrp.Size.Y / 2 or 1.5)
+    local y = hit and (hit.Position.Y + hip + 0.1) or (basePos.Y + 0.3)
+    local stand = Vector3.new(basePos.X, y, basePos.Z)
+
+    return CFrame.lookAt(stand, Vector3.new(lookAtPos.X, stand.Y, lookAtPos.Z))
+end
+
+local function findNpc(doorstep)
+    local want = doorstep and doorstep.Position
+    for _, m in ipairs(workspace:GetChildren()) do
+        if m.Name == "TakeawayCustomer" then
+            local root = m:FindFirstChild("HumanoidRootPart")
+            if root and (not want or (root.Position - want).Magnitude < 15) then
+                return m, root
+            end
+        end
     end
     return nil
 end
 
--- Check apakah sedang dalam job aktif
-local function isJobActive()
-    local cafeJobsGui = pg:FindFirstChild("CafeJobs")
-    if not cafeJobsGui then return false end
-    if not cafeJobsGui.Enabled then return false end
-    local banner = cafeJobsGui:FindFirstChild("Banner")
-    return banner and banner.Visible
+local function moveInFront(j, npc, npcRoot)
+    local goal = getDeliveryGoal(j)
+    if not goal then return false end
+    pcall(function() lp:RequestStreamAroundAsync(goal.Position, 1) end)
+    return tweenTo(goal, function() return job ~= j end)
 end
 
--- Listen for job events dari server
-local activeJobId = nil
-local activeJobType = nil
-local dishRound = 1
-local dishClean = false
-local deliveryTarget = nil
+------------------------------------------------
+-- LANGKAH 4: hand over via REMOTE (cadangan: tahan E / klik tombol)
+------------------------------------------------
+local function holdE(prompt)
+    pcall(function()
+        prompt:InputHoldBegin()
+        task.wait(math.max(prompt.HoldDuration, 0) + 0.05)
+        prompt:InputHoldEnd()
+    end)
+end
 
-JobEvent.OnClientEvent:Connect(function(action, data)
-    if action == "start" then
-        activeJobId = data.id
-        activeJobType = data.job
-        dishRound = 1
-        dishClean = false
-        deliveryTarget = nil
-    elseif action == "plate" then
-        if data.id == activeJobId then
-            dishRound = data.round
-            dishClean = false
-        end
-    elseif action == "delivery" then
-        if data.id == activeJobId then
-            deliveryTarget = data.target
-        end
-    elseif action == "complete" or action == "cancel" then
-        activeJobId = nil
-        activeJobType = nil
-        deliveryTarget = nil
-        dishClean = false
-    elseif action == "scrub" then
-        if data and data.id == activeJobId then
-            if data.progress and data.progress >= 0.95 then
-                dishClean = true
-            end
+local function clickHandOverButton()
+    local gui = pg:FindFirstChild("CafeJobs")
+    local dock = gui and gui:FindFirstChild("Dock")
+    local buttons = dock and dock:FindFirstChild("Buttons")
+    local primary = buttons and buttons:FindFirstChild("Primary")
+    if not primary then return false end
+    local activator = primary:FindFirstChild("Activator", true) or primary
+
+    local fired = false
+    if getconnections then
+        for _, c in ipairs(getconnections(activator.Activated)) do
+            pcall(function() c:Fire() end)
+            fired = true
         end
     end
-end)
+    if not fired and firesignal then
+        fired = pcall(firesignal, activator.Activated)
+    end
+    return fired
+end
 
--- Auto Dishes: trigger prompt, lalu spam scrub events
-getgenv().AutoDishesLoop = true
-task.spawn(function()
-    while getgenv().AutoDishesLoop do
-        if autoDishesEnabled then
-            -- Jika tidak ada job aktif, trigger dishes prompt
-            if not activeJobId then
-                local prompt = findDishesPrompt()
-                if prompt and prompt.Enabled then
-                    -- Fire proximity prompt
-                    fireproximityprompt(prompt)
-                    task.wait(0.8) -- Tunggu server respond
-                end
-            elseif activeJobType == "Dishes" and activeJobId then
-                -- Spam scrub events di posisi yang tepat untuk membersihkan plate
-                -- Scrub di berbagai posisi dalam radius dirt (0.39)
-                -- GridSize = 24, CompletionThreshold = 0.95
-                local scrubPositions = {
-                    Vector2.new(0.5, 0.5),
-                    Vector2.new(0.35, 0.35),
-                    Vector2.new(0.65, 0.35),
-                    Vector2.new(0.35, 0.65),
-                    Vector2.new(0.65, 0.65),
-                    Vector2.new(0.5, 0.35),
-                    Vector2.new(0.5, 0.65),
-                    Vector2.new(0.35, 0.5),
-                    Vector2.new(0.65, 0.5),
-                    Vector2.new(0.42, 0.42),
-                    Vector2.new(0.58, 0.42),
-                    Vector2.new(0.42, 0.58),
-                    Vector2.new(0.58, 0.58),
-                    Vector2.new(0.3, 0.5),
-                    Vector2.new(0.7, 0.5),
-                    Vector2.new(0.5, 0.3),
-                    Vector2.new(0.5, 0.7),
-                    Vector2.new(0.38, 0.3),
-                    Vector2.new(0.62, 0.3),
-                    Vector2.new(0.38, 0.7),
-                    Vector2.new(0.62, 0.7),
-                }
+local function handOver(j, prompt)
+    local function ended()
+        return job == nil or job.id ~= j.id
+    end
 
-                local seq = 0
-                for _, pos in ipairs(scrubPositions) do
-                    if not autoDishesEnabled or not activeJobId or activeJobType ~= "Dishes" then break end
-                    seq += 1
-                    -- FireServer("scrub", id, position, round, seq, hasPrevious)
-                    JobEvent:FireServer("scrub", activeJobId, pos, dishRound, seq, seq > 1)
-                    task.wait(0.09) -- Interval sesuai SendInterval (0.083)
-                end
+    -- 1) REMOTE: kirim "deliver" langsung (sama persis dengan tombol Hand over), tanpa hold
+    JobEvent:FireServer("deliver", j.id)
+    if dwaitUntil(ended, DELIVERY_HAND_TIMEOUT) then return true end
 
-                -- Tunggu server respon plate completion
-                task.wait(0.5)
-            else
-                task.wait(0.3)
-            end
-        else
-            task.wait(0.5)
+    -- cadangan kalau remote tidak direspon server:
+    -- 2) tahan E
+    if prompt and prompt.Enabled then
+        holdE(prompt)
+        if dwaitUntil(ended, DELIVERY_HAND_TIMEOUT) then return true end
+    end
+
+    -- 3) klik tombol "Hand over" di HUD
+    if clickHandOverButton() then
+        if dwaitUntil(ended, DELIVERY_HAND_TIMEOUT) then return true end
+    end
+
+    -- 4) fire prompt langsung
+    if prompt and prompt.Enabled then
+        pcall(fireproximityprompt, prompt)
+        return dwaitUntil(ended, DELIVERY_HAND_TIMEOUT)
+    end
+    return ended()
+end
+
+------------------------------------------------
+-- SATU SIKLUS: accept -> 1 detik -> tween depan NPC -> hand over
+------------------------------------------------
+local function deliveryCycle()
+    -- order nyangkut? (batas delivery 90 detik)
+    if job and os.clock() - job.at > 90 then
+        dlog("order nyangkut / timeout, force cancel")
+        pcall(function() JobEvent:FireServer("cancel", job.id) end)
+        job = nil
+        task.wait(0.5)
+        return
+    end
+
+    -- job lain sedang aktif: jangan ganggu
+    if job and job.kind ~= "Delivery" then
+        task.wait(1)
+        return
+    end
+
+    -- 1. accept
+    if not job or not job.ready then
+        if not acceptOrder() then
+            task.wait(1)
+            return
         end
     end
-end)
 
-------------------------------------------------
--- AUTO TAKEAWAY DELIVERY
--- Trigger prompt, teleport ke target, deliver
-------------------------------------------------
-getgenv().AutoDeliveryLoop = true
+    local j = job
+    if not j or not j.ready then
+        task.wait(0.5)
+        return
+    end
+
+    -- 2. tunggu sebentar setelah accept
+    task.wait(DELIVERY_ACCEPT_WAIT)
+    if job ~= j then return end
+
+    -- 3. langsung tween ke koordinat target / doorstep NPC (tanpa blokir nunggu NPC spawn)
+    local goal = getDeliveryGoal(j)
+    if not goal then
+        dlog("koordinat tujuan tidak valid, reset")
+        job = nil
+        return
+    end
+
+    pcall(function() lp:RequestStreamAroundAsync(goal.Position, 1) end)
+    local tweenOk = tweenTo(goal, function() return job ~= j end)
+    if not tweenOk then
+        if job == j then
+            dlog("tween gagal/batal, reset")
+            job = nil
+        end
+        return
+    end
+
+    if job ~= j then return end
+    dwaitUntil(function() return job ~= j or settled() end, 1)
+    if job ~= j then return end
+
+    -- 4. cari prompt / NPC customer setelah sampai
+    local npc, npcRoot
+    dwaitUntil(function()
+        npc, npcRoot = findNpc(j.doorstep)
+        return npc ~= nil or job ~= j
+    end, 2)
+    if job ~= j then return end
+
+    local prompt = npcRoot and (npcRoot:FindFirstChildOfClass("ProximityPrompt") or npcRoot:FindFirstChildWhichIsA("ProximityPrompt", true))
+
+    local hrp = getHRP()
+    dlog(string.format("di lokasi tujuan (jarak %.1f studs), hand over...", hrp and npcRoot and (hrp.Position - npcRoot.Position).Magnitude or -1))
+
+    -- 5. hand over via remote / prompt / HUD button
+    lastEnd = nil
+    local ok = handOver(j, prompt)
+    if ok and lastEnd and lastEnd.action == "complete" then
+        dlog("order ter-claim")
+    elseif lastEnd and lastEnd.action == "cancel" then
+        dlog("gagal, server cancel:", lastEnd.reason or "?")
+    else
+        dlog("hand over belum respon, cancel & reset")
+        pcall(function() JobEvent:FireServer("cancel", j.id) end)
+        job = nil
+    end
+
+    -- 6. ulang
+    task.wait(DELIVERY_REPEAT_WAIT)
+end
+
+local deliveryRunId = os.clock()
+getgenv().AutoDeliveryRun = deliveryRunId
 task.spawn(function()
-    while getgenv().AutoDeliveryLoop do
+    while getgenv().AutoDeliveryRun == deliveryRunId do
         if autoDeliveryEnabled then
-            if not activeJobId then
-                -- Trigger delivery prompt
-                local prompt = findDeliveryPrompt()
-                if prompt and prompt.Enabled then
-                    fireproximityprompt(prompt)
-                    task.wait(1.0) -- Tunggu server respond dan delivery event
-                end
-            elseif activeJobType == "Delivery" and activeJobId then
-                -- Tunggu sampai deliveryTarget di-set oleh server
-                if deliveryTarget then
-                    -- Teleport karakter ke target
-                    local char = lp.Character
-                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        -- Teleport ke dekat doorstep (target posisi)
-                        hrp.CFrame = CFrame.new(deliveryTarget + Vector3.new(0, 3, 0))
-                        task.wait(0.5)
-
-                        -- Fire deliver event
-                        JobEvent:FireServer("deliver", activeJobId)
-                        task.wait(1.0)
-
-                        -- Teleport balik ke station
-                        local station = findMyStation()
-                        if station then
-                            local delivery = station:FindFirstChild("Delivery")
-                            if delivery and hrp.Parent then
-                                hrp.CFrame = CFrame.new(delivery.Position + Vector3.new(0, 3, 0))
-                            end
-                        end
-                        task.wait(0.5)
-                    end
-                else
-                    task.wait(0.3)
-                end
-            else
-                task.wait(0.3)
+            local ok, err = pcall(deliveryCycle)
+            if not ok then
+                warn("[AutoDelivery] error: " .. tostring(err))
+                task.wait(2)
             end
         else
             task.wait(0.5)
@@ -794,7 +1008,6 @@ end)
 print("[My Cafe Tools] Loaded! Features:")
 print("  - Anti AFK")
 print("  - Auto Catering (fixed accept bug)")
-print("  - Auto Dishes (scrub 1-5 plates)")
-print("  - Auto Delivery (teleport)")
+print("  - Auto Delivery (tween ke depan NPC + hand over)")
 print("  - Hide FX Particles")
 print("  - Playtime tracker")
