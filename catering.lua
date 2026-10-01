@@ -560,7 +560,7 @@ local DELIVERY_ACCEPT_WAIT = 0.5  -- detik setelah accept sebelum tween ke NPC
 local DELIVERY_FRONT_DIST = 3.5   -- jarak berdiri di depan NPC (studs)
 local DELIVERY_REPEAT_WAIT = 0.3  -- jeda sebelum order berikutnya
 local DELIVERY_HAND_TIMEOUT = 1.2 -- tunggu respon server per metode hand over (detik)
-local DELIVERY_TWEEN_SPEED = 80  -- kecepatan tween (studs/detik); kecilkan kalau kena cancel
+local DELIVERY_TWEEN_SPEED = 70  -- kecepatan tween (studs/detik); kecilkan kalau kena cancel
 
 local function dlog(...)
     print("[AutoDelivery]", ...)
